@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Copyright (c) 2014-2017 The Bitcoin Core developers
+# Copyright (c) 2014-2019 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test fee estimation code."""
 from decimal import Decimal
 import random
 
-from test_framework.mininode import CTransaction, CTxIn, CTxOut, COutPoint, ToHex, COIN
+from test_framework.messages import CTransaction, CTxIn, CTxOut, COutPoint, ToHex, COIN
 from test_framework.script import CScript, OP_1, OP_DROP, OP_2, OP_HASH160, OP_EQUAL, hash160, OP_TRUE
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
@@ -15,8 +15,6 @@ from test_framework.util import (
     assert_greater_than_or_equal,
     connect_nodes,
     satoshi_round,
-    sync_blocks,
-    sync_mempools,
 )
 
 # Construct 2 trivial P2SH's and the ScriptSigs that spend them
@@ -65,7 +63,7 @@ def small_txpuzzle_randfee(from_node, conflist, unconflist, amount, min_fee, fee
     # the ScriptSig that will satisfy the ScriptPubKey.
     for inp in tx.vin:
         inp.scriptSig = SCRIPT_SIG[inp.prevout.n]
-    txid = from_node.sendrawtransaction(ToHex(tx), True)
+    txid = from_node.sendrawtransaction(hexstring=ToHex(tx), maxfeerate=0)
     unconflist.append({"txid": txid, "vout": 0, "amount": total_in - amount - fee})
     unconflist.append({"txid": txid, "vout": 1, "amount": amount})
 
@@ -95,11 +93,11 @@ def split_inputs(from_node, txins, txouts, initial_split=False):
     else:
         tx.vin[0].scriptSig = SCRIPT_SIG[prevtxout["vout"]]
         completetx = ToHex(tx)
-    txid = from_node.sendrawtransaction(completetx, True)
+    txid = from_node.sendrawtransaction(hexstring=completetx, maxfeerate=0)
     txouts.append({"txid": txid, "vout": 0, "amount": half_change})
     txouts.append({"txid": txid, "vout": 1, "amount": rem_change})
 
-def check_estimates(node, fees_seen, max_invalid):
+def check_estimates(node, fees_seen):
     """Call estimatesmartfee and verify that the estimates meet certain invariants."""
 
     delta = 1.0e-6  # account for rounding error
@@ -126,6 +124,9 @@ class EstimateFeeTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 3
 
+    def skip_test_if_missing_module(self):
+        self.skip_if_no_wallet()
+
     def setup_network(self):
         """
         We'll setup the network to have 3 nodes that all mine with different parameters.
@@ -133,14 +134,17 @@ class EstimateFeeTest(BitcoinTestFramework):
         which we will use to generate our transactions.
         """
         self.add_nodes(3, extra_args=[["-maxorphantx=1000", "-whitelist=127.0.0.1"],
-                                      ["-blockmaxsize=17000", "-maxorphantx=1000"],
-                                      ["-blockmaxsize=8000", "-maxorphantx=1000"]])
+                                      ["-blockmaxweight=68000", "-maxorphantx=1000"],
+                                      ["-blockmaxweight=32000", "-maxorphantx=1000"]])
         # Use node0 to mine blocks for input splitting
         # Node1 mines small blocks but that are bigger than the expected transaction rate.
-        # NOTE: the CreateNewBlock code starts counting block size at 1,000 bytes,
-        # (17k is room enough for 110 or so transactions)
+        # NOTE: the CreateNewBlock code starts counting block weight at 4,000 weight,
+        # (68k weight is room enough for 120 or so transactions)
         # Node2 is a stingy miner, that
         # produces too small blocks (room for only 55 or so transactions)
+        self.start_nodes()
+        self.import_deterministic_coinbase_privkeys()
+        self.stop_nodes()
 
     def transact_and_mine(self, numblocks, mining_node):
         min_fee = Decimal("0.00001")
@@ -156,9 +160,9 @@ class EstimateFeeTest(BitcoinTestFramework):
                                                       self.memutxo, Decimal("0.005"), min_fee, min_fee)
                 tx_kbytes = (len(txhex) // 2) / 1000.0
                 self.fees_per_kb.append(float(fee) / tx_kbytes)
-            sync_mempools(self.nodes[0:3], wait=.1)
+            self.sync_mempools(self.nodes[0:3], wait=.1)
             mined = mining_node.getblock(mining_node.generate(1)[0], True)["tx"]
-            sync_blocks(self.nodes[0:3], wait=.1)
+            self.sync_blocks(self.nodes[0:3], wait=.1)
             # update which txouts are confirmed
             newmem = []
             for utx in self.memutxo:
@@ -219,21 +223,21 @@ class EstimateFeeTest(BitcoinTestFramework):
             self.log.info("Creating transactions and mining them with a block size that can't keep up")
             # Create transactions and mine 10 small blocks with node 2, but create txs faster than we can mine
             self.transact_and_mine(10, self.nodes[2])
-            check_estimates(self.nodes[1], self.fees_per_kb, 14)
+            check_estimates(self.nodes[1], self.fees_per_kb)
 
             self.log.info("Creating transactions and mining them at a block size that is just big enough")
             # Generate transactions while mining 10 more blocks, this time with node1
             # which mines blocks with capacity just above the rate that transactions are being created
             self.transact_and_mine(10, self.nodes[1])
-            check_estimates(self.nodes[1], self.fees_per_kb, 2)
+            check_estimates(self.nodes[1], self.fees_per_kb)
 
         # Finish by mining a normal-sized block:
         while len(self.nodes[1].getrawmempool()) > 0:
             self.nodes[1].generate(1)
 
-        sync_blocks(self.nodes[0:3], wait=.1)
+        self.sync_blocks(self.nodes[0:3], wait=.1)
         self.log.info("Final estimates after emptying mempools")
-        check_estimates(self.nodes[1], self.fees_per_kb, 2)
+        check_estimates(self.nodes[1], self.fees_per_kb)
 
 if __name__ == '__main__':
     EstimateFeeTest().main()

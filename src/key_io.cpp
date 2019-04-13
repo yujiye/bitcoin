@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2016 The Bitcoin Core developers
+// Copyright (c) 2014-2018 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,7 +7,7 @@
 #include <base58.h>
 #include <bech32.h>
 #include <script/script.h>
-#include <utilstrencodings.h>
+#include <util/strencodings.h>
 
 #include <boost/variant/apply_visitor.hpp>
 #include <boost/variant/static_visitor.hpp>
@@ -24,7 +24,7 @@ private:
     const CChainParams& m_params;
 
 public:
-    DestinationEncoder(const CChainParams& params) : m_params(params) {}
+    explicit DestinationEncoder(const CChainParams& params) : m_params(params) {}
 
     std::string operator()(const CKeyID& id) const
     {
@@ -43,14 +43,16 @@ public:
     std::string operator()(const WitnessV0KeyHash& id) const
     {
         std::vector<unsigned char> data = {0};
-        ConvertBits<8, 5, true>(data, id.begin(), id.end());
+        data.reserve(33);
+        ConvertBits<8, 5, true>([&](unsigned char c) { data.push_back(c); }, id.begin(), id.end());
         return bech32::Encode(m_params.Bech32HRP(), data);
     }
 
     std::string operator()(const WitnessV0ScriptHash& id) const
     {
         std::vector<unsigned char> data = {0};
-        ConvertBits<8, 5, true>(data, id.begin(), id.end());
+        data.reserve(53);
+        ConvertBits<8, 5, true>([&](unsigned char c) { data.push_back(c); }, id.begin(), id.end());
         return bech32::Encode(m_params.Bech32HRP(), data);
     }
 
@@ -60,7 +62,8 @@ public:
             return {};
         }
         std::vector<unsigned char> data = {(unsigned char)id.version};
-        ConvertBits<8, 5, true>(data, id.program, id.program + id.length);
+        data.reserve(1 + (id.length * 8 + 4) / 5);
+        ConvertBits<8, 5, true>([&](unsigned char c) { data.push_back(c); }, id.program, id.program + id.length);
         return bech32::Encode(m_params.Bech32HRP(), data);
     }
 
@@ -94,7 +97,8 @@ CTxDestination DecodeDestination(const std::string& str, const CChainParams& par
         // Bech32 decoding
         int version = bech.second[0]; // The first 5 bit symbol is the witness version (0-16)
         // The rest of the symbols are converted witness program bytes.
-        if (ConvertBits<5, 8, false>(data, bech.second.begin() + 1, bech.second.end())) {
+        data.reserve(((bech.second.size() - 1) * 5) / 8);
+        if (ConvertBits<5, 8, false>([&](unsigned char c) { data.push_back(c); }, bech.second.begin() + 1, bech.second.end())) {
             if (version == 0) {
                 {
                     WitnessV0KeyHash keyid;
@@ -138,7 +142,9 @@ CKey DecodeSecret(const std::string& str)
             key.Set(data.begin() + privkey_prefix.size(), data.begin() + privkey_prefix.size() + 32, compressed);
         }
     }
-    memory_cleanse(data.data(), data.size());
+    if (!data.empty()) {
+        memory_cleanse(data.data(), data.size());
+    }
     return key;
 }
 
